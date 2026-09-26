@@ -1,5 +1,6 @@
 import calendar, datetime, hashlib, json
 from zoneinfo import ZoneInfo
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 import jpholiday
@@ -16,7 +17,20 @@ year=int(a.number_input("年",2000,2100,next_month.year))
 month=int(b.number_input("月",1,12,next_month.month))
 key=f"{year:04d}-{month:02d}"
 ndays=calendar.monthrange(year,month)[1]
-holidays=st.multiselect("特別休日（管理者から指定された平日）",list(range(1,ndays+1)),key=f"holidays_{key}")
+# GitHub上の共通設定を読み込む。各Drは編集しない。
+config_path=Path(__file__).with_name("special_holidays.json")
+try:
+    holiday_config=json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.exists() else {}
+    if not isinstance(holiday_config,dict):
+        raise ValueError("設定は年月と日付リストの形式にしてください。")
+    holidays=holiday_config.get(key,[])
+    if not isinstance(holidays,list) or any(type(d) is not int or not 1<=d<=ndays for d in holidays):
+        raise ValueError("特別休日の日付が不正です。")
+    holidays=sorted(set(holidays))
+except (ValueError,OSError) as e:
+    st.error(f"共通休日設定を読み込めません。管理者へ連絡してください：{e}")
+    st.stop()
+st.caption("管理者設定の特別休日："+("、".join(f"{d}日" for d in holidays) if holidays else "なし")+"（土日祝は自動で休日扱い）")
 weekdays=["月","火","水","木","金","土","日"]
 def holiday(d):
     dt=datetime.date(year,month,d)
@@ -36,6 +50,15 @@ def local_time(value):
     return datetime.datetime.fromisoformat(value).astimezone(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M:%S")
 
 if page=="CSVをまとめる（管理者）":
+    with st.expander("全員共通の特別休日を設定"):
+        st.write("平日で日直が必要な日を選択してください。設定ファイルをダウンロードし、GitHubのapp.pyと同じ場所へアップロードすると全員に適用されます。")
+        choices=[d for d in range(1,ndays+1) if datetime.date(year,month,d).weekday()<5 and not jpholiday.is_holiday(datetime.date(year,month,d))]
+        picked=st.multiselect("この月の特別休日",choices,default=[d for d in holidays if d in choices],key=f"admin_holidays_{key}")
+        updated_config=dict(holiday_config)
+        updated_config[key]=sorted(picked)
+        st.download_button("共通休日設定をダウンロード",json.dumps(updated_config,ensure_ascii=False,indent=2).encode("utf-8"),"special_holidays.json","application/json")
+        st.caption("選択・ダウンロードだけでは全員の設定は変わりません。GitHubへ同名で登録してください。ほかの月の設定は保持されます。入力依頼の前に登録し、シフト作成アプリにも同じ休日を設定してください。")
+        st.link_button("GitHubで設定ファイルをアップロード","https://github.com/ikarahagisu/dr-ng-portal/upload/main")
     st.subheader("提出CSVを医師条件へ取り込む")
     st.write("元の医師条件CSVと、各Drから受け取った提出CSVを選択してください。回数上限などは元の医師条件を保持します。")
     base=st.file_uploader("元の医師条件CSV",type="csv")
@@ -87,7 +110,9 @@ else:
             st.session_state[f"saved_{key}_{doctor}"]=dict(values=vals,duty=duty,holidays=list(holidays),updated=datetime.datetime.now(datetime.timezone.utc).isoformat())
             st.rerun()
 
-    if saved:
+    if saved and saved["holidays"] != holidays:
+        st.warning("管理者の休日設定が変更されました。NG日を確認し、もう一度保存してください。")
+    if saved and saved["holidays"] == holidays:
         submission=pd.DataFrame([{"対象年":year,"対象月":month,"先生の名前":doctor,
             "NG日(半角カンマ区切り)":ng_string(saved["values"]),
             "翌日PM duty":",".join(saved["duty"]),"特別休日":",".join(map(str,sorted(saved["holidays"])))}])
